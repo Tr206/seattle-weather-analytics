@@ -65,8 +65,8 @@ def run_weather_pipeline():
             USING `{staging_table}` S
             ON T.timestamp = S.timestamp AND T.city = S.city
             WHEN NOT MATCHED THEN
-              INSERT (timestamp, city, temp, humidity, weather_description, wind_speed)
-              VALUES (timestamp, city, temp, humidity, weather_description, wind_speed)
+            INSERT (timestamp, city, temp, humidity, weather_description, wind_speed, ingestion_timestamp)
+            VALUES (timestamp, city, temp, humidity, weather_description, wind_speed, CURRENT_TIMESTAMP())
             """
             client.query(merge_query).result()
             print(f"✅ Successfully synced unique rows for {city['name']}.")
