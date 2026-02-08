@@ -1,19 +1,27 @@
+import functions_framework
 import os
 import requests
 import time
 from datetime import datetime, timedelta, UTC
 from google.cloud import bigquery
-from dotenv import load_dotenv
 
-# load_dotenv()
-
-# 1. Configuration: Add your states/cities here
+# Configuration: Add your states/cities here
 CITIES = [
     {"name": "Seattle", "lat": 47.6062, "lon": -122.3321},
     {"name": "Denver", "lat": 39.7392, "lon": -104.9903},
     {"name": "New York", "lat": 40.7128, "lon": -74.0060},
     {"name": "Los Angeles", "lat": 34.0522, "lon": -118.2437}
 ]
+
+@functions_framework.http
+def weather_sync(request):
+    """HTTP Cloud Function entry point triggered by Cloud Scheduler"""
+    try:
+        run_weather_pipeline()
+        return {"status": "success", "message": "Weather sync completed"}, 200
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {"status": "error", "message": str(e)}, 500
 
 def run_weather_pipeline():
     API_KEY = os.getenv("WEATHER_API_KEY")
@@ -50,9 +58,9 @@ def run_weather_pipeline():
             except Exception as e:
                 print(f"Error fetching {city['name']} for day {i}: {e}")
             
-            time.sleep(0.1) # Respecting rate limits
+            time.sleep(0.1)  # Respecting rate limits
 
-        # 2. The "Anti-Duplicate" Merge Strategy
+        # The "Anti-Duplicate" Merge Strategy
         if all_rows:
             # Create a temporary staging table for just this batch
             job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
@@ -73,6 +81,3 @@ def run_weather_pipeline():
             
             # Clean up staging table
             client.delete_table(staging_table, not_found_ok=True)
-
-if __name__ == "__main__":
-    run_weather_pipeline()
