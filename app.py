@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, UTC
 from google.cloud import bigquery
 from dotenv import load_dotenv
 
-load_dotenv()
-# Test2
+# load_dotenv()
+
 # 1. Configuration: Add your states/cities here
 CITIES = [
     {"name": "Seattle", "lat": 47.6062, "lon": -122.3321},
