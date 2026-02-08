@@ -1,36 +1,78 @@
 import os
 import requests
+import time
+from datetime import datetime, timedelta, UTC
 from google.cloud import bigquery
-from datetime import datetime
-import functions_framework
+from dotenv import load_dotenv
 
-@functions_framework.http
-def get_weather(request):
-    # Securely get API key from environment variables (configured in Google Cloud)
+load_dotenv()
+
+# 1. Configuration: Add your states/cities here
+CITIES = [
+    {"name": "Seattle", "lat": 47.6062, "lon": -122.3321},
+    {"name": "Denver", "lat": 39.7392, "lon": -104.9903},
+    {"name": "New York", "lat": 40.7128, "lon": -74.0060},
+    {"name": "Los Angeles", "lat": 34.0522, "lon": -118.2437}
+]
+
+def run_weather_pipeline():
     API_KEY = os.getenv("WEATHER_API_KEY")
-    CITY = "Seattle"
-    PROJECT_ID = "seattle-weather-analytics"
-    TABLE_ID = f"{PROJECT_ID}.weather_raw.seattle_weather_history"
+    PROJECT_ID = os.getenv("GCP_PROJECT_ID", "seattle-weather-analytics")
+    DATASET = "weather_raw"
+    TABLE = "seattle_weather_history"
+    FULL_TABLE_ID = f"{PROJECT_ID}.{DATASET}.{TABLE}"
+    
+    client = bigquery.Client(project=PROJECT_ID)
 
-    # API Request
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=imperial"
-    response = requests.get(url).json()
+    for city in CITIES:
+        print(f"--- Processing {city['name']} ---")
+        all_rows = []
+        
+        # Pulling last 30 days
+        for i in range(0, 31):
+            target_date = datetime.now(UTC) - timedelta(days=i)
+            unix_time = int(target_date.timestamp())
+            
+            url = f"https://api.openweathermap.org/data/3.0/onecall/timemachine?lat={city['lat']}&lon={city['lon']}&dt={unix_time}&appid={API_KEY}&units=imperial"
+            
+            try:
+                response = requests.get(url).json()
+                if "data" in response:
+                    d = response["data"][0]
+                    all_rows.append({
+                        "timestamp": datetime.fromtimestamp(d["dt"], UTC).strftime('%Y-%m-%d %H:%M:%S'),
+                        "city": city['name'],
+                        "temp": d["temp"],
+                        "humidity": d["humidity"],
+                        "weather_description": d["weather"][0]["description"],
+                        "wind_speed": d.get("wind_speed", 0)
+                    })
+            except Exception as e:
+                print(f"Error fetching {city['name']} for day {i}: {e}")
+            
+            time.sleep(0.1) # Respecting rate limits
 
-    # Data Transformation: Preparing rows for BigQuery
-    rows_to_insert = [{
-        "timestamp": datetime.utcnow().isoformat(),
-        "city": response["name"],
-        "temp": response["main"]["temp"],
-        "humidity": response["main"]["humidity"],
-        "weather_description": response["weather"][0]["description"],
-        "wind_speed": response["wind"]["speed"]
-    }]
+        # 2. The "Anti-Duplicate" Merge Strategy
+        if all_rows:
+            # Create a temporary staging table for just this batch
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            staging_table = f"{PROJECT_ID}.{DATASET}.temp_stage_{city['name'].replace(' ', '_')}"
+            client.load_table_from_json(all_rows, staging_table, job_config=job_config).result()
 
-    # Load into BigQuery
-    client = bigquery.Client()
-    errors = client.insert_rows_json(TABLE_ID, rows_to_insert)
+            # MERGE staging table into main table (Only insert if timestamp + city is new)
+            merge_query = f"""
+            MERGE `{FULL_TABLE_ID}` T
+            USING `{staging_table}` S
+            ON T.timestamp = S.timestamp AND T.city = S.city
+            WHEN NOT MATCHED THEN
+              INSERT (timestamp, city, temp, humidity, weather_description, wind_speed)
+              VALUES (timestamp, city, temp, humidity, weather_description, wind_speed)
+            """
+            client.query(merge_query).result()
+            print(f"✅ Successfully synced unique rows for {city['name']}.")
+            
+            # Clean up staging table
+            client.delete_table(staging_table, not_found_ok=True)
 
-    if not errors:
-        return f"Successfully inserted weather data for {CITY}.", 200
-    else:
-        return f"BigQuery Insert Errors: {errors}", 500
+if __name__ == "__main__":
+    run_weather_pipeline()
